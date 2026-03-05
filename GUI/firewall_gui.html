@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>SDN Firewall</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;500;700&display=swap" rel="stylesheet"/>
+<style>
+  :root {
+    --bg:      #080c10;
+    --panel:   #0d1117;
+    --border:  #1e2d3d;
+    --accent:  #00e5ff;
+    --red:     #ff3b5c;
+    --green:   #00ff88;
+    --yellow:  #ffd600;
+    --dim:     #3a4a5a;
+    --text:    #c8d8e8;
+    --mono:    'Share Tech Mono', monospace;
+    --sans:    'Barlow', sans-serif;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Scanline overlay */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,.07) 2px,
+      rgba(0,0,0,.07) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .logo {
+    font-family: var(--mono);
+    font-size: 18px;
+    color: var(--accent);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .logo span { color: var(--red); }
+  .ws-status {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 11px; color: var(--dim);
+  }
+  .ws-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim);
+    transition: background .3s;
+  }
+  .ws-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+  /* ── Layout ── */
+  .grid {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    grid-template-rows: auto 1fr;
+    gap: 1px;
+    height: calc(100vh - 49px);
+    background: var(--border);
+  }
+
+  .panel {
+    background: var(--panel);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .panel-header {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--accent);
+    text-transform: uppercase;
+    display: flex; align-items: center; gap: 8px;
+    flex-shrink: 0;
+  }
+  .panel-header::before {
+    content: '';
+    width: 3px; height: 14px;
+    background: var(--accent);
+  }
+
+  /* ── Stats bar (top-right) ── */
+  .stats-row {
+    grid-column: 2;
+    grid-row: 1;
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    background: var(--border);
+  }
+  .stat-card {
+    flex: 1;
+    background: var(--panel);
+    padding: 12px 18px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .stat-label {
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 2px; color: var(--dim);
+    text-transform: uppercase;
+  }
+  .stat-value {
+    font-family: var(--mono); font-size: 22px;
+    color: var(--text);
+    transition: color .3s;
+  }
+  .stat-value.pulse { color: var(--accent); }
+  .stat-card.danger .stat-value  { color: var(--red); }
+  .stat-card.warn   .stat-value  { color: var(--yellow); }
+  .stat-card.good   .stat-value  { color: var(--green); }
+
+  /* ── Rules panel (left col, row 1+2) ── */
+  .rules-panel {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .rules-body { padding: 12px; display: flex; flex-direction: column; gap: 16px; }
+
+  .rule-section h4 {
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 2px; color: var(--dim);
+    text-transform: uppercase; margin-bottom: 8px;
+  }
+
+  .input-row {
+    display: flex; gap: 6px; margin-bottom: 8px;
+  }
+  .input-row input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono); font-size: 13px;
+    padding: 7px 10px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  .input-row input:focus { border-color: var(--accent); }
+
+  .btn {
+    font-family: var(--mono); font-size: 12px;
+    letter-spacing: 1px;
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all .15s;
+    text-transform: uppercase;
+  }
+  .btn-add  { background: rgba(0,229,255,.08); color: var(--accent); border-color: var(--accent); }
+  .btn-add:hover  { background: rgba(0,229,255,.18); }
+  .btn-del  { background: rgba(255,59,92,.08);  color: var(--red);    border-color: var(--red); }
+  .btn-del:hover  { background: rgba(255,59,92,.18); }
+  .btn-save { background: rgba(0,255,136,.08);  color: var(--green);  border-color: var(--green); }
+  .btn-save:hover { background: rgba(0,255,136,.18); }
+
+  .tag-list { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; }
+  .tag {
+    font-family: var(--mono); font-size: 11px;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    color: var(--text);
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(255,255,255,.03);
+  }
+  .tag.ip-tag    { border-color: var(--red);    color: var(--red); }
+  .tag.port-tag  { border-color: var(--yellow); color: var(--yellow); }
+  .tag .rm {
+    cursor: pointer; color: var(--dim);
+    font-size: 14px; line-height: 1;
+  }
+  .tag .rm:hover { color: var(--red); }
+
+  .rate-row { display: flex; gap: 6px; align-items: center; }
+  .rate-row input { width: 70px; }
+  .rate-row span { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+
+  /* ── Log panel (right col, row 2) ── */
+  .log-panel {
+    grid-column: 2;
+    grid-row: 2;
+    overflow: hidden;
+  }
+  .log-body {
+    padding: 8px 12px;
+    overflow-y: auto;
+    height: 100%;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+
+  .log-entry {
+    font-family: var(--mono); font-size: 12px;
+    padding: 4px 8px;
+    border-left: 2px solid transparent;
+    display: grid;
+    grid-template-columns: 56px 52px 1fr auto;
+    gap: 8px;
+    align-items: center;
+    animation: fadeIn .3s ease;
+  }
+  @keyframes fadeIn { from { opacity:0; transform: translateX(8px); } to { opacity:1; } }
+
+  .log-entry.block  { border-color: var(--red);    background: rgba(255,59,92,.04); }
+  .log-entry.allow  { border-color: var(--green);  background: rgba(0,255,136,.03); }
+  .log-entry.warn   { border-color: var(--yellow); background: rgba(255,214,0,.04); }
+  .log-entry.info   { border-color: var(--accent); background: rgba(0,229,255,.03); }
+
+  .log-ts   { color: var(--dim); }
+  .log-lvl  { font-weight: 700; }
+  .log-entry.block .log-lvl  { color: var(--red); }
+  .log-entry.allow .log-lvl  { color: var(--green); }
+  .log-entry.warn  .log-lvl  { color: var(--yellow); }
+  .log-entry.info  .log-lvl  { color: var(--accent); }
+  .log-msg  { color: var(--text); }
+  .log-extra { color: var(--dim); font-size: 10px; text-align: right; }
+
+  /* Separator */
+  hr.sep { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">SDN<span>/</span>FIREWALL</div>
+  <div style="font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:1px;">
+    OpenFlow 1.3 · Ryu Controller
+  </div>
+  <div class="ws-status">
+    <div class="ws-dot" id="wsDot"></div>
+    <span id="wsLabel">DISCONNECTED</span>
+  </div>
+</header>
+
+<div class="grid">
+
+  <!-- ── Rules panel ── -->
+  <div class="panel rules-panel">
+    <div class="panel-header">Firewall Rules</div>
+    <div class="rules-body">
+
+      <!-- Blocked IPs -->
+      <div class="rule-section">
+        <h4>Blocked IPs</h4>
+        <div class="input-row">
+          <input id="ipInput" type="text" placeholder="e.g. 10.0.0.3"/>
+          <button class="btn btn-add" onclick="addBlockedIP()">+ Block</button>
+        </div>
+        <div class="tag-list" id="blockedIpList"></div>
+      </div>
+
+      <hr class="sep"/>
+
+      <!-- Blocked Ports -->
+      <div class="rule-section">
+        <h4>Blocked Ports (TCP/UDP)</h4>
+        <div class="input-row">
+          <input id="portInput" type="number" placeholder="e.g. 23"/>
+          <button class="btn btn-add" onclick="addBlockedPort()">+ Block</button>
+        </div>
+        <div class="tag-list" id="blockedPortList"></div>
+      </div>
+
+      <hr class="sep"/>
+
+      <!-- Rate limit -->
+      <div class="rule-section">
+        <h4>Rate Limiting</h4>
+        <div class="rate-row">
+          <input id="rlLimit"  type="number" value="100" min="1"/>
+          <span>pkts /</span>
+          <input id="rlWindow" type="number" value="10"  min="1"/>
+          <span>sec</span>
+          <button class="btn btn-save" onclick="saveRateLimit()">Save</button>
+        </div>
+      </div>
+
+      <hr class="sep"/>
+
+      <!-- ARP table -->
+      <div class="rule-section">
+        <h4>ARP Binding Table</h4>
+        <div id="arpTable" style="font-family:var(--mono);font-size:11px;color:var(--dim);line-height:1.8;">
+          — no bindings yet —
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Stats row ── -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Total Pkts</div>
+      <div class="stat-value" id="sTotal">0</div>
+    </div>
+    <div class="stat-card good">
+      <div class="stat-label">Allowed</div>
+      <div class="stat-value" id="sAllowed">0</div>
+    </div>
+    <div class="stat-card danger">
+      <div class="stat-label">Blocked</div>
+      <div class="stat-value" id="sBlocked">0</div>
+    </div>
+    <div class="stat-card warn">
+      <div class="stat-label">Rate Limited</div>
+      <div class="stat-value" id="sRate">0</div>
+    </div>
+    <div class="stat-card warn">
+      <div class="stat-label">Scans</div>
+      <div class="stat-value" id="sScan">0</div>
+    </div>
+    <div class="stat-card danger">
+      <div class="stat-label">ARP Spoofs</div>
+      <div class="stat-value" id="sArp">0</div>
+    </div>
+  </div>
+
+  <!-- ── Event log ── -->
+  <div class="panel log-panel">
+    <div class="panel-header" style="justify-content:space-between;">
+      <span>Live Event Log</span>
+      <button class="btn btn-del" style="font-size:10px;padding:3px 10px;"
+              onclick="document.getElementById('logBody').innerHTML=''">Clear</button>
+    </div>
+    <div class="log-body" id="logBody"></div>
+  </div>
+
+</div>
+
+<script>
+// ── WebSocket ────────────────────────────────────────────────────────────────
+let ws;
+const WS_URL = `ws://${location.host}/firewall/ws`;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    document.getElementById('wsDot').classList.add('live');
+    document.getElementById('wsLabel').textContent = 'LIVE';
+    // Fetch initial state
+    fetchRules();
+    fetchLog();
+    fetchStats();
+  };
+
+  ws.onclose = () => {
+    document.getElementById('wsDot').classList.remove('live');
+    document.getElementById('wsLabel').textContent = 'RECONNECTING…';
+    setTimeout(connect, 3000);
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'event') appendLog(msg.data);
+    if (msg.type === 'stats') updateStats(msg.data);
+  };
+}
+
+connect();
+
+// ── REST helpers ─────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+// ── Rules ─────────────────────────────────────────────────────────────────────
+async function fetchRules() {
+  const rules = await api('GET', '/firewall/rules');
+  renderIPs(rules.blocked_ips || []);
+  renderPorts(rules.blocked_ports || []);
+  document.getElementById('rlLimit').value  = rules.rate_limit  || 100;
+  document.getElementById('rlWindow').value = rules.rate_window || 10;
+}
+
+function renderIPs(ips) {
+  const el = document.getElementById('blockedIpList');
+  el.innerHTML = ips.length
+    ? ips.map(ip => `
+        <div class="tag ip-tag">
+          ${ip}
+          <span class="rm" onclick="removeBlockedIP('${ip}')">×</span>
+        </div>`).join('')
+    : '<span style="font-family:var(--mono);font-size:11px;color:var(--dim);">none</span>';
+}
+
+function renderPorts(ports) {
+  const el = document.getElementById('blockedPortList');
+  el.innerHTML = ports.length
+    ? ports.map(p => `
+        <div class="tag port-tag">
+          :${p}
+          <span class="rm" onclick="removeBlockedPort(${p})">×</span>
+        </div>`).join('')
+    : '<span style="font-family:var(--mono);font-size:11px;color:var(--dim);">none</span>';
+}
+
+async function addBlockedIP() {
+  const ip = document.getElementById('ipInput').value.trim();
+  if (!ip) return;
+  await api('POST', `/firewall/rules/ip/${ip}`);
+  document.getElementById('ipInput').value = '';
+  fetchRules();
+}
+
+async function removeBlockedIP(ip) {
+  await api('DELETE', `/firewall/rules/ip/${ip}`);
+  fetchRules();
+}
+
+async function addBlockedPort() {
+  const port = document.getElementById('portInput').value.trim();
+  if (!port) return;
+  await api('POST', `/firewall/rules/port/${port}`);
+  document.getElementById('portInput').value = '';
+  fetchRules();
+}
+
+async function removeBlockedPort(port) {
+  await api('DELETE', `/firewall/rules/port/${port}`);
+  fetchRules();
+}
+
+async function saveRateLimit() {
+  const limit  = parseInt(document.getElementById('rlLimit').value);
+  const window_ = parseInt(document.getElementById('rlWindow').value);
+  await api('POST', '/firewall/rules/ratelimit', { limit, window: window_ });
+}
+
+// ── Stats ─────────────────────────────────────────────────────────────────────
+async function fetchStats() {
+  const s = await api('GET', '/firewall/stats');
+  updateStats(s);
+}
+
+function updateStats(s) {
+  const set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el.textContent !== String(val)) {
+      el.textContent = val;
+      el.classList.add('pulse');
+      setTimeout(() => el.classList.remove('pulse'), 400);
+    }
+  };
+  set('sTotal',   s.total       || 0);
+  set('sAllowed', s.allowed     || 0);
+  set('sBlocked', s.blocked     || 0);
+  set('sRate',    s.rate_limited|| 0);
+  set('sScan',    s.scan_detected||0);
+  set('sArp',     s.arp_spoof   || 0);
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+async function fetchLog() {
+  const entries = await api('GET', '/firewall/log');
+  entries.forEach(appendLog);
+}
+
+function appendLog(entry) {
+  const body = document.getElementById('logBody');
+  const div  = document.createElement('div');
+  div.className = `log-entry ${entry.level}`;
+  div.innerHTML = `
+    <span class="log-ts">${entry.ts}</span>
+    <span class="log-lvl">${entry.level.toUpperCase()}</span>
+    <span class="log-msg">${entry.msg}</span>
+    <span class="log-extra">${entry.extra || ''}</span>
+  `;
+  body.appendChild(div);
+  // Keep last 150 entries in DOM
+  while (body.children.length > 150) body.removeChild(body.firstChild);
+  body.scrollTop = body.scrollHeight;
+}
+
+// ── Poll stats every 5s (fallback if WS misses) ──────────────────────────────
+setInterval(fetchStats, 5000);
+</script>
+</body>
+</html>
