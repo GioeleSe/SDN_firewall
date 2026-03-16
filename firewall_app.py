@@ -35,7 +35,6 @@ class CheckResult(Enum):
     NULL_SCAN         = ('warn',  'NULL scan from {src}',        'scan_detected', 'NULL_SCAN')
     SYN_FIN           = ('warn',  'SYN+FIN from {src}',          'scan_detected', 'MALFORMED')
     SYN_RST           = ('warn',  'SYN+RST from {src}',          'scan_detected', 'MALFORMED')
-    ACK_SCAN          = ('warn',  'ACK scan from {src}',         'scan_detected', 'MALFORMED')
     FIN_SCAN          = ('warn',  'FIN scan from {src}',         'scan_detected', 'MALFORMED')
 
     def __init__(self, level: str, msg_template: str, stat_key: str | None, extra_tag: str):
@@ -189,20 +188,10 @@ class FirewallApp(app_manager.RyuApp):
     def _check_ip_block(self, datapath, ip_src, ip_dst) -> CheckResult:
         """
             Check if the source of the ip(v4) packet:
-                - is in blocked_ips -> add the rule to ignore other packets from it and return an IP_BLOCKED error
+                - is in blocked_ips -> return CheckResult.IP_BLOCKED
                 - is not in allowed_ips (if not empty) -> return an IP_NOT_ALLOWLIST error
         """
-        # TODO: GOON FROM HERE @.@
-        # need to check how to handle the block removal
-        if ip_src in self.blocked_ips:                                                                                  # blacklist only on src ip
-            parser = datapath.ofproto_parser
-            ofproto = datapath.ofproto
-
-            match_arp = parser.OFPMatch(eth_type=0x0806, arp_spa=ip_src)                                                # allow ARP from blocked host (so MAC resolution still works)
-            self.add_flow(datapath, priority=200, match=match_arp, actions=[parser.OFPActionOutput(ofproto.OFPP_FLOOD)])
-
-            match_ip = parser.OFPMatch(eth_type=0x0800, ipv4_src=ip_src)                                                # match any ipv4 packets coming from the ip specified in blocked_ips
-            self.add_flow(datapath, priority=100, match=match_ip, actions=[])                                           # void actions -> ignore the packets (high priority to be one of the first rules to check)
+        if ip_src in self.blocked_ips:                                                                                  # blacklist only on src ip (still enough to kill all the channels to/from it)
             return CheckResult.IP_BLOCKED
 
         if self.allowed_ips and ip_src not in self.allowed_ips:                                                         # inverse logic (whitelist) handler
@@ -238,19 +227,9 @@ class FirewallApp(app_manager.RyuApp):
 
         """
         if (dst_port, proto_num) in self.blocked_ports:
-            parser = datapath.ofproto_parser
-            kw = None
-            if proto_num == 6:
-                kw = {'tcp_dst': dst_port}
-            elif proto_num == 17:
-                kw = {'udp_dst': dst_port}
-            else:
-                return CheckResult.ALLOWED                                                                              # for now blocked protocols are only tcp and udp, the others are allowed
-            match = parser.OFPMatch(eth_type=0x0800, ip_proto=proto_num, **kw)
-            self.add_flow(datapath, priority=200, match=match, actions=[])
             return CheckResult.PORT_BLOCKED
-
-        return CheckResult.ALLOWED
+        else:
+            return CheckResult.ALLOWED
 
     def _check_tcp_flags(self, datapath, tcp_pkt, ip_src) -> CheckResult:
         """
@@ -273,16 +252,8 @@ class FirewallApp(app_manager.RyuApp):
             result = CheckResult.SYN_FIN
         if flags_bits & (SYN | RST) == (SYN | RST):                                                                     # like SYN and FIN
             result = CheckResult.SYN_RST
-        if flags_bits == ACK:
-            result = CheckResult.ACK_SCAN                                                                               # only ACK active as first packet -> probably a scan (like nmap)
         if flags_bits == FIN:
             result = CheckResult.FIN_SCAN                                                                               # probably a scan
-
-        if result != CheckResult.ALLOWED:
-            parser = datapath.ofproto_parser
-            match = parser.OFPMatch(eth_type=0x0800, ip_proto=6, ipv4_src=ip_src)                                       # match IPv4 TCP messages from current source IP address
-            self.add_flow(datapath, priority=200, match=match, actions=[], idle_timeout=60)                             # drop them (30s for recovery)
-            return result
 
         return result
 
@@ -298,7 +269,7 @@ class FirewallApp(app_manager.RyuApp):
         elif self.arp_table[ip_src] != src_mac:                                                                         # signal the changing mac address
             parser = datapath.ofproto_parser
             match = parser.OFPMatch(eth_type=0x0806, arp_spa=ip_src)                                                    # drop ARP from the current ipv4 address
-            self.add_flow(datapath, priority=200, match=match, actions=[], idle_timeout=60)                             # drop them (30s for recovery)
+            self.add_flow(datapath, priority=200, match=match, actions=[], idle_timeout=10)                             # drop them (quick recovery)
             return CheckResult.ARP_SPOOF
         else:
             return CheckResult.ALLOWED
@@ -453,10 +424,13 @@ class FirewallApp(app_manager.RyuApp):
 
         # install only a table-miss flow entry (rest of the logic here in the controller)
         match = parser.OFPMatch()  # match everything
-        actions = [
-            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 65535)]  # can specify a limit, it's using ovs version 3
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 65535)]
         self.arp_table.clear()  # avoid old data issues
         self.add_flow(datapath, 0, match, actions)  # priority 0, ignore if there's something else
+
+        match_ip = parser.OFPMatch(eth_type=0x0800)
+        self.add_flow(datapath, priority=300, match=match_ip, actions=actions)                                          # IPv4 → ALWAYS to controller, no flow ever installed
+
 
     # ── Packet-in handler ────────────────────────────────────────────────────
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -478,6 +452,7 @@ class FirewallApp(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         eth_pkt = pkt.get_protocol(ethernet.ethernet)
         result = CheckResult.ALLOWED                                                                                    # sanity check section (initially set as ALLOWED)
+        self.logger.debug(f"packet in with ethernet protcol: {eth_pkt.ethertype}")
 
         if eth_pkt.ethertype == 2048:                                                                                   # IPv4 ethernet frame: 0x0800 -> 2048
             ip_pkt = pkt.get_protocol(ipv4.ipv4)
@@ -517,11 +492,11 @@ class FirewallApp(app_manager.RyuApp):
                 log_src = ip_src
                 log_dst = ip_dst
                 if result == CheckResult.PORT_BLOCKED:
-                    #log_port = tcp_pkt.dst_port if tcp_pkt else udp_pkt.dst_port                                       # too much python-like
-                    log_port = struct.unpack('!H', ip_pkt.payload[2:4])[0]                                       # dst port is at bytes 2-4 for both TCP and UDP (a bit faster)
                     if ip_pkt.proto == 6:
+                        log_port = pkt.get_protocol(tcp.tcp).dst_port                                                   # too much python-like but it works
                         log_proto = 'TCP'
                     elif ip_pkt.proto == 17:
+                        log_port = pkt.get_protocol(udp.udp).dst_port
                         log_proto = 'UDP'
                     else:
                         log_proto = f'{ip_pkt.proto}'
@@ -534,7 +509,7 @@ class FirewallApp(app_manager.RyuApp):
 
             actions = [parser.OFPActionOutput(out_port)]
 
-            if out_port != ofproto.OFPP_FLOOD:                                                                          # check if it's a known path
+            if (eth_pkt.ethertype != 0x0800) and (out_port != ofproto.OFPP_FLOOD):                                      # check if it's a known path (and not an IPV4 packet)
                 match = parser.OFPMatch(in_port=in_port, eth_dst=eth_dst, eth_src=eth_src)                              # install the new flow
                 if msg.buffer_id != ofproto.OFP_NO_BUFFER:
                     self.add_flow(datapath, priority=1, match=match, actions=actions, buffer_id=msg.buffer_id, idle_timeout=0, hard_timeout=0)  # specify the buffer in which this message is stored in the switch

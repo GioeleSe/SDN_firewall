@@ -49,7 +49,7 @@ class FirewallWSGI(ControllerBase):
 
     def add_blocked_ip(self, req, ip, **_kw):
         self.app.blocked_ips.add(ip)
-        self.app._flush_flows_for_ip(ip)
+        # self.app._flush_flows_for_ip(ip)                                                                              # not needed with no ip flows installed
         self.app._log('info', f'Rule added: block IP {ip}', src=ip)
         return self._json({'status': 'ok', 'blocked_ips': list(self.app.blocked_ips)})
 
